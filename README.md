@@ -16,7 +16,7 @@ ErisPulse RSS 订阅器模块——在聊天中订阅任意 RSS/Atom 源，自�
 ## 安装
 
 ```bash
-epsdk install ErisPulse-RssReader
+epsdk install RssReader
 ```
 
 或本地开发：
