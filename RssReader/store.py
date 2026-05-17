@@ -8,6 +8,7 @@ from ErisPulse import sdk
 
 _SUBS = "rssreader_subscriptions"
 _HIST = "rssreader_history"
+_FILTERS = "rssreader_filters"
 
 _SUB_COLS = [
     "id", "url", "name", "target_type", "target_id", "platform",
@@ -48,6 +49,16 @@ class FeedStore:
                 "title": "TEXT DEFAULT ''",
                 "link": "TEXT DEFAULT ''",
                 "published_at": "REAL DEFAULT 0",
+            })
+        if not sdk.storage.HasTable(_FILTERS):
+            sdk.storage.CreateTable(_FILTERS, {
+                "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+                "target_type": "TEXT NOT NULL",
+                "target_id": "TEXT NOT NULL",
+                "pattern": "TEXT NOT NULL",
+                "rule_type": "TEXT NOT NULL",
+                "is_regex": "INTEGER DEFAULT 0",
+                "created_at": "REAL DEFAULT 0",
             })
 
     def add_subscription(
@@ -141,6 +152,61 @@ class FeedStore:
             "link": item["link"],
             "published_at": time.time(),
         }).Execute()
+
+    def add_filter(
+        self,
+        target_type: str,
+        target_id: str,
+        pattern: str,
+        rule_type: str,
+        is_regex: bool = False,
+    ) -> Optional[int]:
+        sdk.storage.Table(_FILTERS).Insert({
+            "target_type": target_type,
+            "target_id": target_id,
+            "pattern": pattern,
+            "rule_type": rule_type,
+            "is_regex": 1 if is_regex else 0,
+            "created_at": time.time(),
+        }).Execute()
+        row = (
+            sdk.storage.Table(_FILTERS).Select("id")
+            .Where("target_type = ? AND target_id = ? AND pattern = ? AND rule_type = ?",
+                   target_type, target_id, pattern, rule_type)
+            .OrderBy("id DESC")
+            .ExecuteOne()
+        )
+        return row[0] if row else None
+
+    def remove_filter(self, filter_id: int) -> bool:
+        if not sdk.storage.Table(_FILTERS).Select("id").Where("id = ?", filter_id).Exists():
+            return False
+        sdk.storage.Table(_FILTERS).Delete().Where("id = ?", filter_id).Execute()
+        return True
+
+    def list_filters(
+        self,
+        target_type: str = None,
+        target_id: str = None,
+    ) -> List[dict]:
+        _FILTER_COLS = ["id", "target_type", "target_id", "pattern", "rule_type", "is_regex", "created_at"]
+        query = sdk.storage.Table(_FILTERS).Select(*_FILTER_COLS)
+        conds, params = [], []
+        if target_type:
+            conds.append("target_type = ?"); params.append(target_type)
+        if target_id:
+            conds.append("target_id = ?"); params.append(target_id)
+        if conds:
+            query = query.Where(" AND ".join(conds), *params)
+        return [dict(zip(_FILTER_COLS, r)) for r in query.OrderBy("id").Execute()]
+
+    def get_applicable_filters(self, target_type: str, target_id: str) -> List[dict]:
+        _FILTER_COLS = ["id", "target_type", "target_id", "pattern", "rule_type", "is_regex", "created_at"]
+        rows = sdk.storage.Table(_FILTERS).Select(*_FILTER_COLS).Where(
+            "target_type = ? AND target_id = ?",
+            target_type, target_id,
+        ).OrderBy("id").Execute()
+        return [dict(zip(_FILTER_COLS, r)) for r in rows]
 
     def get_all_enabled(self) -> List[dict]:
         return [_to_dict(r) for r in sdk.storage.Table(_SUBS).Select(*_SUB_COLS).Where("enabled = 1").Execute()]
