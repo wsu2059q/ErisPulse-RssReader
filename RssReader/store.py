@@ -11,7 +11,7 @@ _HIST = "rssreader_history"
 _FILTERS = "rssreader_filters"
 
 _SUB_COLS = [
-    "id", "url", "name", "target_type", "target_id", "platform",
+    "id", "url", "name", "target_type", "target_id", "platform", "bot_id",
     "keywords_include", "keywords_exclude", "interval_minutes",
     "enabled", "max_items_per_push", "created_at",
 ]
@@ -34,6 +34,7 @@ class FeedStore:
                 "target_type": "TEXT NOT NULL",
                 "target_id": "TEXT NOT NULL",
                 "platform": "TEXT NOT NULL",
+                "bot_id": "TEXT DEFAULT ''",
                 "keywords_include": "TEXT DEFAULT ''",
                 "keywords_exclude": "TEXT DEFAULT ''",
                 "interval_minutes": "INTEGER DEFAULT 30",
@@ -41,6 +42,11 @@ class FeedStore:
                 "max_items_per_push": "INTEGER DEFAULT 5",
                 "created_at": "REAL DEFAULT 0",
             })
+        else:
+            try:
+                sdk.storage.AlterTable(_SUBS).AddColumn("bot_id", "TEXT DEFAULT ''").Execute()
+            except Exception:
+                pass
         if not sdk.storage.HasTable(_HIST):
             sdk.storage.CreateTable(_HIST, {
                 "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
@@ -68,6 +74,7 @@ class FeedStore:
         target_type: str,
         target_id: str,
         platform: str,
+        bot_id: str = "",
         keywords_include: str = "",
         keywords_exclude: str = "",
         interval_minutes: int = 30,
@@ -87,6 +94,7 @@ class FeedStore:
             "target_type": target_type,
             "target_id": target_id,
             "platform": platform,
+            "bot_id": bot_id,
             "keywords_include": keywords_include,
             "keywords_exclude": keywords_exclude,
             "interval_minutes": interval_minutes,
@@ -169,14 +177,14 @@ class FeedStore:
             "is_regex": 1 if is_regex else 0,
             "created_at": time.time(),
         }).Execute()
-        row = (
+        rows = (
             sdk.storage.Table(_FILTERS).Select("id")
             .Where("target_type = ? AND target_id = ? AND pattern = ? AND rule_type = ?",
                    target_type, target_id, pattern, rule_type)
-            .OrderBy("id DESC")
-            .ExecuteOne()
+            .OrderBy("id")
+            .Execute()
         )
-        return row[0] if row else None
+        return rows[-1][0] if rows else None
 
     def remove_filter(self, filter_id: int) -> bool:
         if not sdk.storage.Table(_FILTERS).Select("id").Where("id = ?", filter_id).Exists():
@@ -203,10 +211,37 @@ class FeedStore:
     def get_applicable_filters(self, target_type: str, target_id: str) -> List[dict]:
         _FILTER_COLS = ["id", "target_type", "target_id", "pattern", "rule_type", "is_regex", "created_at"]
         rows = sdk.storage.Table(_FILTERS).Select(*_FILTER_COLS).Where(
-            "target_type = ? AND target_id = ?",
+            "(target_type = ? AND target_id = ?) OR (target_type = 'global' AND target_id = 'global')",
             target_type, target_id,
         ).OrderBy("id").Execute()
         return [dict(zip(_FILTER_COLS, r)) for r in rows]
 
     def get_all_enabled(self) -> List[dict]:
         return [_to_dict(r) for r in sdk.storage.Table(_SUBS).Select(*_SUB_COLS).Where("enabled = 1").Execute()]
+
+    def get_all_subscriptions(self) -> List[dict]:
+        return [_to_dict(r) for r in sdk.storage.Table(_SUBS).Select(*_SUB_COLS).OrderBy("id").Execute()]
+
+    def update_subscription(self, sub_id: int, fields: dict) -> bool:
+        if not sdk.storage.Table(_SUBS).Select("id").Where("id = ?", sub_id).Exists():
+            return False
+        allowed = {"name", "interval_minutes", "keywords_include", "keywords_exclude", "max_items_per_push"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        sdk.storage.Table(_SUBS).Update(updates).Where("id = ?", sub_id).Execute()
+        return True
+
+    def get_all_filters(self) -> List[dict]:
+        _FILTER_COLS = ["id", "target_type", "target_id", "pattern", "rule_type", "is_regex", "created_at"]
+        return [dict(zip(_FILTER_COLS, r)) for r in sdk.storage.Table(_FILTERS).Select(*_FILTER_COLS).OrderBy("id").Execute()]
+
+    def get_stats(self) -> dict:
+        all_subs = self.get_all_subscriptions()
+        all_filters = self.get_all_filters()
+        return {
+            "total": len(all_subs),
+            "enabled": sum(1 for s in all_subs if s.get("enabled")),
+            "disabled": sum(1 for s in all_subs if not s.get("enabled")),
+            "filters": len(all_filters),
+        }

@@ -23,6 +23,7 @@ class FeedTemplates:
             ("6", "立即推送"),
             ("7", "批量添加订阅"),
             ("8", "过滤规则管理"),
+            ("9", "导出订阅"),
         ]
         items_html = "".join(
             f'<div style="font-size: 13px; margin-bottom: 4px;">'
@@ -36,22 +37,22 @@ class FeedTemplates:
                 f'<div style="padding: 12px; border-radius: 8px;">'
                 f'<div style="color: {PRIMARY}; font-size: 15px; font-weight: bold; margin-bottom: 10px;">RSS 订阅管理</div>'
                 f'{items_html}'
-                f'<div style="font-size: 11px; color: {SECONDARY}; margin-top: 8px;">回复编号或操作名称，也可直接 /rss &lt;URL&gt;</div>'
+                f'<div style="font-size: 11px; color: {SECONDARY}; margin-top: 8px;">回复编号或操作名称，也可直接 /RSS &lt;URL&gt;</div>'
                 f'</div>'
             ),
             "markdown": (
                 f"**RSS 订阅管理**\n\n"
                 "1. 添加订阅\n2. 查看订阅列表\n3. 删除订阅\n"
                 "4. 暂停/恢复订阅\n5. 测试 RSS 源\n6. 立即推送\n"
-                "7. 批量添加订阅\n8. 过滤规则管理\n\n"
-                "回复编号即可，也可直接 `/rss <URL>`"
+                "7. 批量添加订阅\n8. 过滤规则管理\n9. 导出订阅\n\n"
+                "回复编号即可，也可直接 `/RSS <URL>`"
             ),
             "text": (
                 "RSS 订阅管理\n"
                 "1. 添加订阅\n2. 查看订阅列表\n3. 删除订阅\n"
                 "4. 暂停/恢复订阅\n5. 测试RSS源\n6. 立即推送\n"
-                "7. 批量添加订阅\n8. 过滤规则管理\n"
-                "回复编号即可，也可 /rss <URL>"
+                "7. 批量添加订阅\n8. 过滤规则管理\n9. 导出订阅\n"
+                "回复编号即可，也可 /RSS <URL>"
             ),
         }
 
@@ -291,6 +292,8 @@ class FeedTemplates:
                 f'<div style="font-size: 14px; margin-bottom: 4px;">'
                 f'<span style="color: {PRIMARY}; font-weight: bold; margin-right: 4px;">#{sub["id"]}</span>'
                 f'{name}</div>'
+                f'<div style="font-size: 11px; color: {SECONDARY}; margin-bottom: 2px; word-break: break-all;">'
+                f'<a href="{sub.get("url", "")}" style="color: {SECONDARY};">{sub.get("url", "")}</a></div>'
                 f'<div style="font-size: 12px; color: {SECONDARY};">'
                 f'<span style="color: {status_color};">{status_text}</span> | '
                 f'每 {interval} 分钟</div></div>'
@@ -311,7 +314,9 @@ class FeedTemplates:
             status = "运行中" if sub.get("enabled") else "已暂停"
             name = sub.get("name") or sub.get("url", "")
             interval = sub.get("interval_minutes", 30)
+            url = sub.get("url", "")
             lines.append(f"- `#{sub['id']}` **{name}** - {status} | {interval}min")
+            lines.append(f"  `{url}`")
         return "\n".join(lines)
 
     @classmethod
@@ -321,7 +326,9 @@ class FeedTemplates:
             status = "运行中" if sub.get("enabled") else "已暂停"
             name = sub.get("name") or sub.get("url", "")
             interval = sub.get("interval_minutes", 30)
+            url = sub.get("url", "")
             lines.append(f"#{sub['id']} {name}")
+            lines.append(f"   {url}")
             lines.append(f"   {status} | 每{interval}分钟")
         return "\n".join(lines)
 
