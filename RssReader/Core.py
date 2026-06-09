@@ -25,6 +25,7 @@ _MENU_MAP = {
     "7": "batch_add", "批量添加": "batch_add", "批量": "batch_add",
     "8": "filter", "过滤规则": "filter", "过滤": "filter", "黑白名单": "filter",
     "9": "export", "导出": "export", "导出订阅": "export", "一键导出": "export",
+    "10": "interval", "修改间隔": "interval", "修改时间": "interval", "间隔": "interval",
 }
 
 _FILTER_MENU_MAP = {
@@ -118,6 +119,7 @@ class Main(BaseModule):
             "batch_add": self._menu_batch_add,
             "filter": self._menu_filter,
             "export": self._menu_export,
+            "interval": self._menu_interval,
         }.get(action)
         if handler:
             await handler(event)
@@ -243,6 +245,48 @@ class Main(BaseModule):
 
         name = sub.get("name") or sub.get("url", "")
         await self._send_templates(event, FeedTemplates.build_status_msg(name, action))
+
+    async def _menu_interval(self, event):
+        target_type, target_id = self._target_info(event)
+        subs = self.store.list_subscriptions(target_type=target_type, target_id=target_id)
+        if not subs:
+            await event.reply("没有订阅")
+            return
+
+        options = []
+        for s in subs:
+            status = "运行中" if s.get("enabled") else "已暂停"
+            minutes = s.get("interval_minutes", 30)
+            label = f"{minutes}分钟" if minutes < 60 else (f"{minutes // 60}小时" if minutes % 60 == 0 else f"{minutes}分钟")
+            options.append(f"#{s['id']} {s.get('name') or s.get('url', '')} [{status}] 间隔:{label}")
+
+        choice = await event.choose("选择要修改间隔的订阅:", options)
+        if choice is None:
+            return
+
+        sub = subs[choice]
+        sub_id = sub["id"]
+
+        interval_choice = await event.choose(
+            "选择新的推送间隔:",
+            ["5分钟", "15分钟", "30分钟", "1小时", "3小时"]
+        )
+        if interval_choice is None:
+            await event.reply("已取消")
+            return
+
+        new_interval = [5, 15, 30, 60, 180][interval_choice]
+        self.store.update_subscription(sub_id, {"interval_minutes": new_interval})
+
+        if sub.get("enabled"):
+            self.scheduler.cancel_for(sub_id)
+            updated_sub = self.store.get_subscription(sub_id)
+            if updated_sub:
+                self.scheduler.spawn_for(updated_sub)
+
+        name = sub.get("name") or sub.get("url", "")
+        new_label = f"{new_interval}分钟" if new_interval < 60 else (f"{new_interval // 60}小时" if new_interval % 60 == 0 else f"{new_interval}分钟")
+        await event.reply(f"已将「{name}」的推送间隔修改为 {new_label}")
 
     async def _menu_test(self, event):
         await event.reply("请输入要测试的 RSS 源地址:")

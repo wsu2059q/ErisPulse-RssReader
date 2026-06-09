@@ -1,6 +1,6 @@
 [project]
 name = "ErisPulse-RssReader"
-version = "1.1.1"
+version = "1.1.2"
 description = "RSS订阅器模块——在聊天中订阅任意RSS/Atom源，自动推送更新"
 readme = "README.md"
 requires-python = ">=3.10"
