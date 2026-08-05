@@ -26,6 +26,7 @@ _MENU_MAP = {
     "8": "filter", "过滤规则": "filter", "过滤": "filter", "黑白名单": "filter",
     "9": "export", "导出": "export", "导出订阅": "export", "一键导出": "export",
     "10": "interval", "修改间隔": "interval", "修改时间": "interval", "间隔": "interval",
+    "11": "health", "健康检查": "health", "健康": "health", "失效": "health",
 }
 
 _FILTER_MENU_MAP = {
@@ -44,7 +45,7 @@ class Main(BaseModule):
         self.logger = sdk.logger.get_child("RssReader")
         self.config = self._load_config()
         self.store = FeedStore()
-        self.scheduler = FeedScheduler(self.store, self.logger)
+        self.scheduler = FeedScheduler(self.store, self.logger, self.config)
 
     @staticmethod
     def get_load_strategy():
@@ -60,12 +61,18 @@ class Main(BaseModule):
                 "auto_start": True,
                 "max_subs_per_chat": 20,
                 "admins": [],
+                "health_check_interval": 1440,
+                "health_check_fail_threshold": 3,
             }
             sdk.config.setConfig("RssReader", default, immediate=True)
             self.logger.info("已创建默认配置")
             return default
         if "admins" not in config:
             config["admins"] = []
+        if "health_check_interval" not in config:
+            config["health_check_interval"] = 1440
+        if "health_check_fail_threshold" not in config:
+            config["health_check_fail_threshold"] = 3
         return config
 
     def _is_admin(self, event) -> bool:
@@ -120,6 +127,7 @@ class Main(BaseModule):
             "filter": self._menu_filter,
             "export": self._menu_export,
             "interval": self._menu_interval,
+            "health": self._menu_health,
         }.get(action)
         if handler:
             await handler(event)
@@ -170,6 +178,7 @@ class Main(BaseModule):
             keywords_include=keywords,
             interval_minutes=interval,
             max_items_per_push=self.config.get("max_items_per_push", 5),
+            added_by=event.get_user_id(),
         )
         if sub_id is None:
             await conv.say("该源已订阅")
@@ -288,6 +297,94 @@ class Main(BaseModule):
         new_label = f"{new_interval}分钟" if new_interval < 60 else (f"{new_interval // 60}小时" if new_interval % 60 == 0 else f"{new_interval}分钟")
         await event.reply(f"已将「{name}」的推送间隔修改为 {new_label}")
 
+    async def _menu_health(self, event):
+        if not self._is_admin(event):
+            await event.reply("仅管理员可使用健康检查功能")
+            return
+
+        conv = event.conversation(timeout=180)
+        threshold = self.config.get("health_check_fail_threshold", 3)
+        unhealthy = self.store.list_unhealthy(fail_threshold=threshold)
+
+        await self._send_templates_conv(conv, event, FeedTemplates.build_health_list(unhealthy, threshold))
+
+        if not unhealthy:
+            await conv.say("输入“检查”可立即手动体检全部订阅，或回复“退出”结束")
+            resp = await conv.wait()
+            if not resp:
+                return
+            if resp.get_text().strip() in ("检查", "体检", "scan", "check"):
+                await conv.say(f"正在体检 {len(self.store.get_all_enabled())} 个订阅...")
+                await self.scheduler._run_health_check()
+                unhealthy = self.store.list_unhealthy(fail_threshold=threshold)
+                await self._send_templates_conv(conv, event, FeedTemplates.build_health_list(unhealthy, threshold))
+                if not unhealthy:
+                    return
+            else:
+                return
+
+        await conv.say("请选择操作: 1=单独删除  2=单独更改URL  3=一键删除全部失效  4=手动体检  5=退出")
+        resp = await conv.wait()
+        if not resp:
+            return
+        choice = resp.get_text().strip()
+
+        if choice == "3":
+            for sub in unhealthy:
+                self.scheduler.cancel_for(sub["id"])
+                self.store.remove_subscription(sub["id"])
+            await conv.say(f"已删除 {len(unhealthy)} 个失效订阅")
+            return
+
+        if choice == "4":
+            await conv.say(f"正在体检 {len(self.store.get_all_enabled())} 个订阅...")
+            await self.scheduler._run_health_check()
+            unhealthy = self.store.list_unhealthy(fail_threshold=threshold)
+            await self._send_templates_conv(conv, event, FeedTemplates.build_health_list(unhealthy, threshold))
+            return
+
+        if choice == "5":
+            return
+
+        if choice not in ("1", "2"):
+            await conv.say("未知操作，已结束")
+            return
+
+        options = [f"#{s['id']} {s.get('name') or s.get('url', '')} (失败 {s.get('fail_count', 0)} 次)" for s in unhealthy]
+        idx = await conv.choose("选择目标订阅:", options)
+        if idx is None:
+            return
+        sub = unhealthy[idx]
+        sub_id = sub["id"]
+
+        if choice == "1":
+            self.scheduler.cancel_for(sub_id)
+            self.store.remove_subscription(sub_id)
+            await conv.say(f"已删除: {sub.get('name', sub.get('url', ''))}")
+            return
+
+        if choice == "2":
+            await conv.say(f"当前URL: {sub.get('url', '')}\n请输入新的 RSS 源地址:")
+            r = await conv.wait()
+            if not r:
+                return
+            new_url = r.get_text().strip()
+            if not new_url:
+                await conv.say("URL为空，已取消")
+                return
+            await conv.say(f"正在检测: {new_url}")
+            probe = await probe_rss(new_url)
+            if not probe:
+                await conv.say("无法解析该RSS源，已取消")
+                return
+            self.store.update_subscription(sub_id, {"url": new_url, "name": probe.get("name", new_url)})
+            self.store.reset_health(sub_id)
+            self.scheduler.cancel_for(sub_id)
+            updated = self.store.get_subscription(sub_id)
+            if updated and updated.get("enabled"):
+                self.scheduler.spawn_for(updated)
+            await conv.say(f"已更新「{probe.get('name', new_url)}」的URL并重置健康状态")
+
     async def _menu_test(self, event):
         await event.reply("请输入要测试的 RSS 源地址:")
         reply = await event.wait_reply(timeout=60)
@@ -379,27 +476,37 @@ class Main(BaseModule):
         if resp and resp.get_text().strip() not in ("跳过", "skip", ""):
             keywords = resp.get_text().strip()
 
-        if self._check_limit(conv, target_type, target_id):
-            return
+        max_subs = self.config.get("max_subs_per_chat", 20)
+        current_count = len(self.store.list_subscriptions(target_type=target_type, target_id=target_id, enabled_only=False))
+        added_in_batch = 0
 
         for v in valid:
+            if current_count + added_in_batch >= max_subs:
+                results = [r if r["url"] != v["url"] else {**r, "ok": False, "reason": "已达订阅上限"} for r in results]
+                continue
+
             sub_id = self.store.add_subscription(
-                url=url,
-                name=probe.get("name", url),
+                url=v["url"],
+                name=v["probe"].get("name", v["url"]),
                 target_type=target_type,
                 target_id=target_id,
                 platform=platform,
                 keywords_include=keywords,
                 interval_minutes=interval,
                 max_items_per_push=self.config.get("max_items_per_push", 5),
+                added_by=event.get_user_id(),
             )
             if sub_id is not None:
+                added_in_batch += 1
                 self.scheduler.spawn_for(self.store.get_subscription(sub_id))
                 for item in await fetch_rss(v["url"], count=3):
                     self.store.record_item(sub_id, item.to_dict())
                 results = [r if r["url"] != v["url"] else {**r, "ok": True, "name": v["probe"].get("name", v["url"])} for r in results]
             else:
                 results = [r if r["url"] != v["url"] else {**r, "ok": False, "reason": "该源已订阅"} for r in results]
+
+        if added_in_batch and current_count + added_in_batch >= max_subs:
+            await conv.say(f"提示: 已达订阅上限 {max_subs}，剩余源未添加")
 
         await self._send_templates_conv(conv, event, FeedTemplates.build_batch_result(results))
 
@@ -538,6 +645,7 @@ class Main(BaseModule):
             platform=platform,
             interval_minutes=interval,
             max_items_per_push=self.config.get("max_items_per_push", 5),
+            added_by=event.get_user_id(),
         )
         if sub_id is None:
             await event.reply("该源已订阅")
@@ -636,6 +744,9 @@ class Main(BaseModule):
         r.register_http_route("RssReader", "/api/subscriptions", handler=self._api_list_subs, methods=["GET"])
         r.register_http_route("RssReader", "/api/subscriptions", handler=self._api_add_sub, methods=["POST"])
         r.register_http_route("RssReader", "/api/subscriptions/export", handler=self._api_export_subs, methods=["GET"])
+        r.register_http_route("RssReader", "/api/subscriptions/unhealthy", handler=self._api_unhealthy_subs, methods=["GET"])
+        r.register_http_route("RssReader", "/api/subscriptions/health-check", handler=self._api_health_check, methods=["POST"])
+        r.register_http_route("RssReader", "/api/subscriptions/purge-unhealthy", handler=self._api_purge_unhealthy, methods=["POST"])
         r.register_http_route("RssReader", "/api/subscriptions/{sub_id}", handler=self._api_update_sub, methods=["PUT"])
         r.register_http_route("RssReader", "/api/subscriptions/{sub_id}", handler=self._api_delete_sub, methods=["DELETE"])
         r.register_http_route("RssReader", "/api/subscriptions/{sub_id}/toggle", handler=self._api_toggle_sub, methods=["POST"])
@@ -645,23 +756,29 @@ class Main(BaseModule):
 
     def _unregister_routes(self):
         r = self.sdk.router
-        for path in ["/api/stats", "/api/subscriptions", "/api/subscriptions/export"]:
+        for path in [
+            "/api/stats", "/api/subscriptions", "/api/subscriptions/export",
+            "/api/subscriptions/unhealthy", "/api/subscriptions/health-check",
+            "/api/subscriptions/purge-unhealthy",
+        ]:
             try:
                 r.unregister_http_route("RssReader", path)
             except Exception:
                 pass
-        for suffix in ["/api/subscriptions/0", "/api/subscriptions/0/toggle", "/api/filters/0"]:
+        for path in [
+            "/api/subscriptions/{sub_id}",
+            "/api/subscriptions/{sub_id}/toggle",
+            "/api/filters/{filter_id}",
+        ]:
             try:
-                r.unregister_http_route("RssReader", "/api/subscriptions/{sub_id}")
-                r.unregister_http_route("RssReader", "/api/subscriptions/{sub_id}/toggle")
-                r.unregister_http_route("RssReader", "/api/filters/{filter_id}")
+                r.unregister_http_route("RssReader", path)
             except Exception:
                 pass
 
     async def _api_stats(self, request: Request) -> JSONResponse:
         if not self._verify_request(request):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
-        return JSONResponse(self.store.get_stats())
+        return JSONResponse(self.store.get_stats(fail_threshold=self.config.get("health_check_fail_threshold", 3)))
 
     async def _api_list_subs(self, request: Request) -> JSONResponse:
         if not self._verify_request(request):
@@ -718,10 +835,20 @@ class Main(BaseModule):
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+        url_changed = "url" in body and body["url"]
+        if url_changed:
+            probe = await probe_rss(body["url"])
+            if not probe:
+                return JSONResponse({"error": "Cannot parse new RSS URL"}, status_code=400)
+            if "name" not in body:
+                body["name"] = probe.get("name", body["url"])
         if not self.store.update_subscription(sub_id, body):
             return JSONResponse({"error": "Subscription not found"}, status_code=404)
+        if url_changed:
+            self.store.reset_health(sub_id)
         sub = self.store.get_subscription(sub_id)
         if sub and sub.get("enabled"):
+            self.scheduler.cancel_for(sub_id)
             self.scheduler.spawn_for(sub)
         return JSONResponse({"success": True})
 
@@ -759,6 +886,36 @@ class Main(BaseModule):
             url = sub.get("url", "")
             lines.append(f"{name} | {url}")
         return JSONResponse({"export": "\n".join(lines), "count": len(subs)})
+
+    async def _api_unhealthy_subs(self, request: Request) -> JSONResponse:
+        if not self._verify_request(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        threshold = self.config.get("health_check_fail_threshold", 3)
+        unhealthy = self.store.list_unhealthy(fail_threshold=threshold)
+        return JSONResponse({"subscriptions": unhealthy, "threshold": threshold})
+
+    async def _api_health_check(self, request: Request) -> JSONResponse:
+        if not self._verify_request(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        try:
+            await self.scheduler._run_health_check()
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+        threshold = self.config.get("health_check_fail_threshold", 3)
+        unhealthy = self.store.list_unhealthy(fail_threshold=threshold)
+        return JSONResponse({"success": True, "unhealthy": len(unhealthy)})
+
+    async def _api_purge_unhealthy(self, request: Request) -> JSONResponse:
+        if not self._verify_request(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        threshold = self.config.get("health_check_fail_threshold", 3)
+        unhealthy = self.store.list_unhealthy(fail_threshold=threshold)
+        count = 0
+        for sub in unhealthy:
+            self.scheduler.cancel_for(sub["id"])
+            if self.store.remove_subscription(sub["id"]):
+                count += 1
+        return JSONResponse({"success": True, "deleted": count})
 
     async def _api_list_filters(self, request: Request) -> JSONResponse:
         if not self._verify_request(request):
@@ -841,6 +998,9 @@ class Main(BaseModule):
 .rs-badge-bl{background:rgba(231,76,60,.1);color:var(--er-c)}
 .rs-badge-wl{background:rgba(46,204,113,.12);color:var(--ok-c)}
 .rs-badge-rx{background:rgba(155,89,182,.1);color:#9b59b6}
+.rs-badge-ok{background:rgba(46,204,113,.12);color:var(--ok-c)}
+.rs-badge-fail{background:rgba(231,76,60,.1);color:var(--er-c)}
+.rs-badge-unchecked{background:rgba(0,0,0,.06);color:var(--tx-t)}
 .rs-url{font-size:11px;color:var(--tx-t);word-break:break-all;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rs-btn-sm{padding:3px 10px;font-size:12px;border:none;border-radius:4px;cursor:pointer;margin-right:4px}
 .rs-btn-sm:hover{opacity:.8}
@@ -867,12 +1027,14 @@ class Main(BaseModule):
         <div>
             <button class="btn btn-primary" onclick="rsShowAddSub()">添加订阅</button>
             <button class="btn btn-secondary" onclick="rsExportSubs()">导出</button>
+            <button class="btn btn-secondary" onclick="rsHealthCheck()">体检</button>
+            <button class="btn btn-secondary" style="color:var(--er-c)" onclick="rsPurgeUnhealthy()">一键删除失效</button>
             <button class="btn btn-icon" onclick="loadRssReaderView()">⟳</button>
         </div>
     </div>
     <div class="card-body" style="overflow-x:auto">
         <table class="rs-table">
-            <thead><tr><th>ID</th><th>名称</th><th>URL</th><th>平台</th><th>目标</th><th>状态</th><th>间隔</th><th>操作</th></tr></thead>
+            <thead><tr><th>ID</th><th>名称</th><th>URL</th><th>平台</th><th>目标</th><th>状态</th><th>健康</th><th>间隔</th><th>操作</th></tr></thead>
             <tbody id="rs-sub-tbody"></tbody>
         </table>
     </div>
@@ -913,6 +1075,16 @@ class Main(BaseModule):
     <div style="display:flex;gap:8px;justify-content:flex-end">
         <button class="btn btn-secondary" onclick="rsHideAddSub()">取消</button>
         <button class="btn btn-primary" onclick="rsSubmitSub()">添加</button>
+    </div>
+</div>
+<div id="rs-editurl-modal-bg" class="rs-modal-bg" onclick="rsHideEditUrl()"></div>
+<div id="rs-editurl-modal" class="rs-modal" style="display:none">
+    <h3>修改订阅 URL</h3>
+    <div class="rs-field"><label>当前 URL</label><input id="rs-editurl-old" readonly></div>
+    <div class="rs-field"><label>新 URL</label><input id="rs-editurl-new" placeholder="https://new-source.com/feed.xml"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-secondary" onclick="rsHideEditUrl()">取消</button>
+        <button class="btn btn-primary" onclick="rsSubmitEditUrl()">保存</button>
     </div>
 </div>
 <div id="rs-filter-modal-bg" class="rs-modal-bg" onclick="rsHideAddFilter()"></div>
@@ -968,11 +1140,21 @@ function loadRssReaderView(){
         el.innerHTML='<div class="rs-stat-item"><div class="num">'+(d.total||0)+'</div><div class="lbl">总订阅</div></div>'
             +'<div class="rs-stat-item"><div class="num">'+(d.enabled||0)+'</div><div class="lbl">运行中</div></div>'
             +'<div class="rs-stat-item"><div class="num">'+(d.disabled||0)+'</div><div class="lbl">已暂停</div></div>'
+            +'<div class="rs-stat-item" style="cursor:pointer" onclick="rsFilterUnhealthy()" title="点击查看失效订阅"><div class="num" style="color:'+(d.unhealthy?'var(--er-c)':'')+'">'+(d.unhealthy||0)+'</div><div class="lbl">失效</div></div>'
             +'<div class="rs-stat-item"><div class="num">'+(d.filters||0)+'</div><div class="lbl">过滤规则</div></div>';
     });
     rsLoadSubs();
     rsLoadFilters();
     rsLoadPlatforms();
+}
+function rsFilterUnhealthy(){
+    rsApi('GET','/api/subscriptions/unhealthy').then(function(d){
+        var tb=document.getElementById('rs-sub-tbody');
+        if(!tb)return;
+        var subs=d.subscriptions||[];
+        if(!subs.length){alert('当前没有失效订阅');return;}
+        rsRenderSubs(subs,true);
+    });
 }
 function rsLoadPlatforms(){
     fetch('/Dashboard/api/adapters',{
@@ -1008,22 +1190,38 @@ function rsLoadPlatforms(){
 }
 function rsLoadSubs(){
     rsApi('GET','/api/subscriptions').then(function(d){
-        var tb=document.getElementById('rs-sub-tbody');
-        if(!tb)return;
-        var subs=d.subscriptions||[];
-        if(!subs.length){tb.innerHTML='<tr><td colspan="8" style="color:var(--tx-t);text-align:center">暂无订阅</td></tr>';return;}
-        var html='';
-        for(var i=0;i<subs.length;i++){
-            var s=subs[i];
-            var status=s.enabled?'<span class="rs-badge rs-badge-on">运行中</span>':'<span class="rs-badge rs-badge-off">已暂停</span>';
-            var act=s.enabled?'<button class="rs-btn-sm" style="background:var(--bg-s);color:var(--tx-p)" onclick="rsToggleSub('+s.id+')">暂停</button>'
-                :'<button class="rs-btn-sm" style="background:var(--ok-c);color:#fff" onclick="rsToggleSub('+s.id+')">恢复</button>';
-            act+='<button class="rs-btn-sm" style="background:var(--er-c);color:#fff" onclick="rsDeleteSub('+s.id+')">删除</button>';
-            var tgt=s.target_type==='global'?'全局':s.target_type+':'+s.target_id;
-            html+='<tr><td>'+s.id+'</td><td>'+esc(s.name||s.url)+'</td><td class="rs-url" title="'+esc(s.url)+'">'+esc(s.url)+'</td><td>'+esc(s.platform||'')+'</td><td>'+esc(tgt)+'</td><td>'+status+'</td><td>'+s.interval_minutes+'m</td><td>'+act+'</td></tr>';
-        }
-        tb.innerHTML=html;
+        rsRenderSubs(d.subscriptions||[],false);
     });
+}
+function rsRenderSubs(subs,isFiltered){
+    var tb=document.getElementById('rs-sub-tbody');
+    if(!tb)return;
+    if(!subs.length){
+        tb.innerHTML='<tr><td colspan="9" style="color:var(--tx-t);text-align:center">'+(isFiltered?'当前没有失效订阅':'暂无订阅')+'</td></tr>';
+        return;
+    }
+    var html='';
+    for(var i=0;i<subs.length;i++){
+        var s=subs[i];
+        var status=s.enabled?'<span class="rs-badge rs-badge-on">运行中</span>':'<span class="rs-badge rs-badge-off">已暂停</span>';
+        var fc=s.fail_count||0;
+        var ls=s.last_status||'unchecked';
+        var healthBadge;
+        if(ls==='ok'){
+            healthBadge='<span class="rs-badge rs-badge-ok">健康</span>';
+        }else if(ls==='fail'){
+            healthBadge='<span class="rs-badge rs-badge-fail" title="'+esc(s.last_error||'')+'">失败×'+fc+'</span>';
+        }else{
+            healthBadge='<span class="rs-badge rs-badge-unchecked">未检</span>';
+        }
+        var act=s.enabled?'<button class="rs-btn-sm" style="background:var(--bg-s);color:var(--tx-p)" onclick="rsToggleSub('+s.id+')">暂停</button>'
+            :'<button class="rs-btn-sm" style="background:var(--ok-c);color:#fff" onclick="rsToggleSub('+s.id+')">恢复</button>';
+        act+='<button class="rs-btn-sm" style="background:var(--accent);color:#fff" onclick="rsShowEditUrl('+s.id+',\''+esc(s.url||'').replace(/'/g,"\\'")+'\')">改URL</button>';
+        act+='<button class="rs-btn-sm" style="background:var(--er-c);color:#fff" onclick="rsDeleteSub('+s.id+')">删除</button>';
+        var tgt=s.target_type==='global'?'全局':s.target_type+':'+s.target_id;
+        html+='<tr><td>'+s.id+'</td><td>'+esc(s.name||s.url)+'</td><td class="rs-url" title="'+esc(s.url)+'">'+esc(s.url)+'</td><td>'+esc(s.platform||'')+'</td><td>'+esc(tgt)+'</td><td>'+status+'</td><td>'+healthBadge+'</td><td>'+s.interval_minutes+'m</td><td>'+act+'</td></tr>';
+    }
+    tb.innerHTML=html;
 }
 function rsLoadFilters(){
     rsApi('GET','/api/filters').then(function(d){
@@ -1047,6 +1245,43 @@ function rsToggleSub(id){rsApi('POST','/api/subscriptions/'+id+'/toggle').then(f
 function rsDeleteSub(id){
     if(!confirm('确定删除该订阅?'))return;
     rsApi('DELETE','/api/subscriptions/'+id).then(function(){loadRssReaderView();});
+}
+function rsShowEditUrl(id,curUrl){
+    document.getElementById('rs-editurl-old').value=curUrl||'';
+    document.getElementById('rs-editurl-new').value='';
+    document.getElementById('rs-editurl-modal-bg').style.display='block';
+    document.getElementById('rs-editurl-modal').style.display='block';
+    document.getElementById('rs-editurl-modal').setAttribute('data-id',id);
+}
+function rsHideEditUrl(){
+    document.getElementById('rs-editurl-modal-bg').style.display='none';
+    document.getElementById('rs-editurl-modal').style.display='none';
+}
+function rsSubmitEditUrl(){
+    var modal=document.getElementById('rs-editurl-modal');
+    var id=modal.getAttribute('data-id');
+    var newUrl=document.getElementById('rs-editurl-new').value.trim();
+    if(!newUrl){alert('请输入新URL');return;}
+    rsApi('PUT','/api/subscriptions/'+id,{url:newUrl}).then(function(d){
+        if(d.error){alert(d.error);return;}
+        rsHideEditUrl();
+        loadRssReaderView();
+    });
+}
+function rsHealthCheck(){
+    if(!confirm('确定对所有订阅立即体检?'))return;
+    rsApi('POST','/api/subscriptions/health-check').then(function(d){
+        if(d.error){alert(d.error);return;}
+        loadRssReaderView();
+    });
+}
+function rsPurgeUnhealthy(){
+    if(!confirm('确定删除全部失效订阅?此操作不可撤销!'))return;
+    rsApi('POST','/api/subscriptions/purge-unhealthy').then(function(d){
+        if(d.error){alert(d.error);return;}
+        alert('已删除 '+d.deleted+' 个失效订阅');
+        loadRssReaderView();
+    });
 }
 function rsDeleteFilter(id){
     if(!confirm('确定删除该规则?'))return;
@@ -1076,16 +1311,7 @@ function rsSubmitFilter(){
         rsHideAddFilter();
         document.getElementById('rs-fl-pattern').value='';
         document.getElementById('rs-fl-tid').value='';
-        rsLoadFilters();
-        rsApi('GET','/api/stats').then(function(s){
-            var el=document.getElementById('rs-stats');
-            if(el){
-                el.innerHTML='<div class="rs-stat-item"><div class="num">'+(s.total||0)+'</div><div class="lbl">总订阅</div></div>'
-                    +'<div class="rs-stat-item"><div class="num">'+(s.enabled||0)+'</div><div class="lbl">运行中</div></div>'
-                    +'<div class="rs-stat-item"><div class="num">'+(s.disabled||0)+'</div><div class="lbl">已暂停</div></div>'
-                    +'<div class="rs-stat-item"><div class="num">'+(s.filters||0)+'</div><div class="lbl">过滤规则</div></div>';
-            }
-        });
+        loadRssReaderView();
     });
 }
 function rsExportSubs(){

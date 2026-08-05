@@ -14,6 +14,7 @@ _SUB_COLS = [
     "id", "url", "name", "target_type", "target_id", "platform", "bot_id",
     "keywords_include", "keywords_exclude", "interval_minutes",
     "enabled", "max_items_per_push", "created_at",
+    "added_by", "last_status", "last_check_at", "last_error", "fail_count",
 ]
 
 
@@ -41,12 +42,25 @@ class FeedStore:
                 "enabled": "INTEGER DEFAULT 1",
                 "max_items_per_push": "INTEGER DEFAULT 5",
                 "created_at": "REAL DEFAULT 0",
+                "added_by": "TEXT DEFAULT ''",
+                "last_status": "TEXT DEFAULT 'unchecked'",
+                "last_check_at": "REAL DEFAULT 0",
+                "last_error": "TEXT DEFAULT ''",
+                "fail_count": "INTEGER DEFAULT 0",
             })
         else:
-            try:
-                sdk.storage.AlterTable(_SUBS).AddColumn("bot_id", "TEXT DEFAULT ''").Execute()
-            except Exception:
-                pass
+            for col, ddl in [
+                ("bot_id", "TEXT DEFAULT ''"),
+                ("added_by", "TEXT DEFAULT ''"),
+                ("last_status", "TEXT DEFAULT 'unchecked'"),
+                ("last_check_at", "REAL DEFAULT 0"),
+                ("last_error", "TEXT DEFAULT ''"),
+                ("fail_count", "INTEGER DEFAULT 0"),
+            ]:
+                try:
+                    sdk.storage.AlterTable(_SUBS).AddColumn(col, ddl).Execute()
+                except Exception:
+                    pass
         if not sdk.storage.HasTable(_HIST):
             sdk.storage.CreateTable(_HIST, {
                 "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
@@ -79,6 +93,7 @@ class FeedStore:
         keywords_exclude: str = "",
         interval_minutes: int = 30,
         max_items_per_push: int = 5,
+        added_by: str = "",
     ) -> Optional[int]:
         exists = (
             sdk.storage.Table(_SUBS).Select("id")
@@ -101,6 +116,7 @@ class FeedStore:
             "enabled": 1,
             "max_items_per_push": max_items_per_push,
             "created_at": time.time(),
+            "added_by": added_by,
         }).Execute()
 
         row = (
@@ -225,18 +241,66 @@ class FeedStore:
     def update_subscription(self, sub_id: int, fields: dict) -> bool:
         if not sdk.storage.Table(_SUBS).Select("id").Where("id = ?", sub_id).Exists():
             return False
-        allowed = {"name", "interval_minutes", "keywords_include", "keywords_exclude", "max_items_per_push"}
+        allowed = {"name", "url", "interval_minutes", "keywords_include", "keywords_exclude", "max_items_per_push"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False
         sdk.storage.Table(_SUBS).Update(updates).Where("id = ?", sub_id).Execute()
         return True
 
+    def update_health(self, sub_id: int, ok: bool, error: str = "") -> int:
+        if not sdk.storage.Table(_SUBS).Select("id").Where("id = ?", sub_id).Exists():
+            return -1
+        if ok:
+            sdk.storage.Table(_SUBS).Update({
+                "last_status": "ok",
+                "last_check_at": time.time(),
+                "last_error": "",
+                "fail_count": 0,
+            }).Where("id = ?", sub_id).Execute()
+            return 0
+        row = (
+            sdk.storage.Table(_SUBS).Select("fail_count")
+            .Where("id = ?", sub_id)
+            .ExecuteOne()
+        )
+        prev_fail = int(row[0]) if row else 0
+        new_fail = prev_fail + 1
+        sdk.storage.Table(_SUBS).Update({
+            "last_status": "fail",
+            "last_check_at": time.time(),
+            "last_error": error[:200],
+            "fail_count": new_fail,
+        }).Where("id = ?", sub_id).Execute()
+        return new_fail
+
+    def reset_health(self, sub_id: int) -> bool:
+        if not sdk.storage.Table(_SUBS).Select("id").Where("id = ?", sub_id).Exists():
+            return False
+        sdk.storage.Table(_SUBS).Update({
+            "last_status": "unchecked",
+            "last_check_at": 0,
+            "last_error": "",
+            "fail_count": 0,
+        }).Where("id = ?", sub_id).Execute()
+        return True
+
+    def list_unhealthy(self, fail_threshold: int = 3, target_type: str = None, target_id: str = None) -> List[dict]:
+        query = sdk.storage.Table(_SUBS).Select(*_SUB_COLS)
+        conds = [f"fail_count >= ?", "enabled = 1"]
+        params: list = [fail_threshold]
+        if target_type:
+            conds.append("target_type = ?"); params.append(target_type)
+        if target_id:
+            conds.append("target_id = ?"); params.append(target_id)
+        query = query.Where(" AND ".join(conds), *params)
+        return [_to_dict(r) for r in query.OrderBy("id").Execute()]
+
     def get_all_filters(self) -> List[dict]:
         _FILTER_COLS = ["id", "target_type", "target_id", "pattern", "rule_type", "is_regex", "created_at"]
         return [dict(zip(_FILTER_COLS, r)) for r in sdk.storage.Table(_FILTERS).Select(*_FILTER_COLS).OrderBy("id").Execute()]
 
-    def get_stats(self) -> dict:
+    def get_stats(self, fail_threshold: int = 3) -> dict:
         all_subs = self.get_all_subscriptions()
         all_filters = self.get_all_filters()
         return {
@@ -244,4 +308,5 @@ class FeedStore:
             "enabled": sum(1 for s in all_subs if s.get("enabled")),
             "disabled": sum(1 for s in all_subs if not s.get("enabled")),
             "filters": len(all_filters),
+            "unhealthy": sum(1 for s in all_subs if s.get("enabled") and int(s.get("fail_count") or 0) >= fail_threshold),
         }

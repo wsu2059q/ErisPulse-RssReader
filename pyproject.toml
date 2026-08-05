@@ -1,22 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "ErisPulse-RssReader"
-version = "1.1.2"
+version = "1.2.0"
 description = "RSS订阅器模块——在聊天中订阅任意RSS/Atom源，自动推送更新"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" } 
+license = "MIT"
 authors = [ { name = "wsu2059q", email = "wsu2059@qq.com" } ]
+keywords = [
+    "ErisPulse",
+    "RssReader",
+    "rss",
+    "atom",
+    "feed",
+    "subscription",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content :: News/Diary",
+]
 dependencies = [
     "feedparser>=6.0",
     "beautifulsoup4>=4.12",
 ]
 
 [project.urls]
-homepage = "https://github.com/ErisPulse/ErisPulse-RssReader"
+homepage = "https://github.com/wsu2059q/ErisPulse-RssReader"
+repository = "https://github.com/wsu2059q/ErisPulse-RssReader"
+issues = "https://github.com/wsu2059q/ErisPulse-RssReader/issues"
 
 [project.entry-points."erispulse.module"]
 "RssReader" = "RssReader:Main"
 
-[tool.setuptools.packages.find]
-include = ["RssReader*"]
-exclude = ["config*", "tests*"]
+[tool.hatch.build.targets.wheel]
+packages = ["RssReader"]

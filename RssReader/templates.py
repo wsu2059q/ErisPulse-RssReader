@@ -24,6 +24,8 @@ class FeedTemplates:
             ("7", "批量添加订阅"),
             ("8", "过滤规则管理"),
             ("9", "导出订阅"),
+            ("10", "修改推送间隔"),
+            ("11", "订阅健康检查"),
         ]
         items_html = "".join(
             f'<div style="font-size: 13px; margin-bottom: 4px;">'
@@ -44,7 +46,8 @@ class FeedTemplates:
                 f"**RSS 订阅管理**\n\n"
                 "1. 添加订阅\n2. 查看订阅列表\n3. 删除订阅\n"
                 "4. 暂停/恢复订阅\n5. 测试 RSS 源\n6. 立即推送\n"
-                "7. 批量添加订阅\n8. 过滤规则管理\n9. 导出订阅\n\n"
+                "7. 批量添加订阅\n8. 过滤规则管理\n9. 导出订阅\n"
+                "10. 修改推送间隔\n11. 订阅健康检查\n\n"
                 "回复编号即可，也可直接 `/RSS <URL>`"
             ),
             "text": (
@@ -52,6 +55,7 @@ class FeedTemplates:
                 "1. 添加订阅\n2. 查看订阅列表\n3. 删除订阅\n"
                 "4. 暂停/恢复订阅\n5. 测试RSS源\n6. 立即推送\n"
                 "7. 批量添加订阅\n8. 过滤规则管理\n9. 导出订阅\n"
+                "10. 修改推送间隔\n11. 订阅健康检查\n"
                 "回复编号即可，也可 /RSS <URL>"
             ),
         }
@@ -526,6 +530,77 @@ class FeedTemplates:
             lines.append(f"#{f['id']} [{rt}{regex_tag}] {f['pattern']}")
             lines.append(f"   作用域: {scope}")
         return "\n".join(lines)
+
+    @classmethod
+    def build_health_alert(cls, sub: dict, fail_count: int) -> Dict[str, str]:
+        name = sub.get("name") or sub.get("url", "")
+        url = sub.get("url", "")
+        error = sub.get("last_error") or "未知错误"
+        added_by = sub.get("added_by", "")
+        mention = f" (订阅人: {added_by})" if added_by else ""
+        return {
+            "html": (
+                f'<div style="padding: 12px; border-radius: 8px; border-left: 3px solid #e74c3c;">'
+                f'<div style="color: #e74c3c; font-size: 14px; font-weight: bold; margin-bottom: 6px;">订阅源失效</div>'
+                f'<div style="font-size: 13px; margin-bottom: 4px;"><b>{name}</b>{mention}</div>'
+                f'<div style="font-size: 11px; color: {SECONDARY}; word-break: break-all; margin-bottom: 4px;">{url}</div>'
+                f'<div style="font-size: 12px; color: #e74c3c;">连续失败 {fail_count} 次: {error}</div>'
+                f'<div style="font-size: 11px; color: {SECONDARY}; margin-top: 6px;">请管理员通过菜单或 Dashboard 处理</div>'
+                f'</div>'
+            ),
+            "markdown": (
+                f"**⚠️ 订阅源失效**\n"
+                f"**{name}**{mention}\n"
+                f"`{url}`\n"
+                f"连续失败 {fail_count} 次: {error}\n"
+                f"请管理员通过菜单或 Dashboard 处理"
+            ),
+            "text": (
+                f"[订阅源失效]\n"
+                f"{name}{mention}\n"
+                f"{url}\n"
+                f"连续失败 {fail_count} 次: {error}\n"
+                f"请管理员通过菜单或 Dashboard 处理"
+            ),
+        }
+
+    @classmethod
+    def build_health_list(cls, unhealthy_subs: list, threshold: int) -> Dict[str, str]:
+        if not unhealthy_subs:
+            ok_msg = f"当前没有失效订阅 (阈值: 连续失败 {threshold} 次)"
+            return {"html": ok_msg, "markdown": ok_msg, "text": ok_msg}
+        rows_html = []
+        md_lines = [f"**失效订阅** ({len(unhealthy_subs)} 个, 阈值 {threshold} 次)", ""]
+        text_lines = [f"失效订阅 ({len(unhealthy_subs)} 个)", "----------"]
+        for sub in unhealthy_subs:
+            name = sub.get("name") or sub.get("url", "")
+            url = sub.get("url", "")
+            fail = sub.get("fail_count", 0)
+            err = (sub.get("last_error") or "")[:80]
+            added_by = sub.get("added_by", "")
+            mention = f" @ {added_by}" if added_by else ""
+            rows_html.append(
+                f'<div style="padding: 6px; margin-bottom: 4px; background: rgba(231,76,60,0.06); border-radius: 4px;">'
+                f'<div style="font-size: 13px;"><span style="color: {PRIMARY}; font-weight: bold;">#{sub["id"]}</span> {name}<span style="color: {SECONDARY}; font-size: 11px;">{mention}</span></div>'
+                f'<div style="font-size: 11px; color: {SECONDARY}; word-break: break-all;">{url}</div>'
+                f'<div style="font-size: 11px; color: #e74c3c;">失败 {fail} 次: {err}</div></div>'
+            )
+            md_lines.append(f"- `#{sub['id']}` **{name}**{mention} - 失败 {fail} 次")
+            md_lines.append(f"  `{url}`")
+            md_lines.append(f"  _{err}_")
+            text_lines.append(f"#{sub['id']} {name}{mention} - 失败 {fail} 次")
+            text_lines.append(f"   {url}")
+            text_lines.append(f"   {err}")
+        return {
+            "html": (
+                f'<div style="padding: 12px; border-radius: 8px;">'
+                f'<div style="color: #e74c3c; font-size: 14px; font-weight: bold; margin-bottom: 8px;">失效订阅 ({len(unhealthy_subs)})</div>'
+                f'{"".join(rows_html)}'
+                f'</div>'
+            ),
+            "markdown": "\n".join(md_lines),
+            "text": "\n".join(text_lines),
+        }
 
     @staticmethod
     def _fmt_time(dt) -> str:
