@@ -1,7 +1,7 @@
 <div align="center">
 
 <img src=".github/assets/RssReaderIcon.svg" width="120" alt="RssReader" />
-<span style="font-size:44px;color:#c8c8c8;margin:0 18px;vertical-align:middle;">×</span>
+<span style="font-size:44px;color:#c8c8c8;margin:0 18px;vertical-align:middle;"></span>
 <img src=".github/assets/ErisPulseLogo.png" height="120" alt="ErisPulse" />
 
 # ErisPulse-RssReader
