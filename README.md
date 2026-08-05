@@ -75,7 +75,7 @@ pip install ErisPulse-RssReader
 | 8 | 过滤规则管理 |
 | 9 | 导出订阅 |
 | 10 | 修改推送间隔 |
-| 11 | 订阅健康检查（管理员） |
+| 11 | 订阅健康检查（管理本人添加的失效源；管理员可管理全部） |
 
 ### HTTP API
 
@@ -107,9 +107,10 @@ default_interval = 30          # 默认推送间隔（分钟）
 max_items_per_push = 5         # 每次推送最大条数
 auto_start = true              # 启动时自动开始抓取
 max_subs_per_chat = 20         # 每个聊天最大订阅数
-admins = []                    # 管理员用户 ID（健康检查菜单）
+admins = []                    # 管理员用户 ID（健康检查可管理全部订阅）
 health_check_interval = 1440   # 健康检查间隔（分钟）
 health_check_fail_threshold = 3 # 连续失败几次判定失效
+health_check_probe_timeout = 10 # 体检单个源的最长超时（秒）
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -118,9 +119,10 @@ health_check_fail_threshold = 3 # 连续失败几次判定失效
 | `max_items_per_push` | `5` | 每次推送最大条数 |
 | `auto_start` | `true` | 启动时自动开始抓取 |
 | `max_subs_per_chat` | `20` | 每个聊天最大订阅数 |
-| `admins` | `[]` | 管理员用户 ID（健康检查菜单） |
+| `admins` | `[]` | 管理员用户 ID（健康检查可管理全部订阅） |
 | `health_check_interval` | `1440` | 健康检查间隔（分钟） |
 | `health_check_fail_threshold` | `3` | 连续失败几次判定失效 |
+| `health_check_probe_timeout` | `10` | 体检单个源最长超时（秒） |
 
 ### 推送效果
 
@@ -140,7 +142,7 @@ RssReader/
 └── templates.py     Html / Markdown / Text 降级模板
 ```
 
-> 自 v1.2 起，存储层为每条订阅记录 `added_by / last_status / last_check_at / last_error / fail_count`，支持定时健康检查与管理员驱动的失效源清理。
+> 自 v1.2 起，存储层为每条订阅记录 `added_by / last_status / last_check_at / last_error / fail_count`，支持定时健康检查；添加者可管理自己添加的失效源，管理员可管理全部。
 
 ## License
 

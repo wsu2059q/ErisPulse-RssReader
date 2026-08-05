@@ -63,6 +63,7 @@ class Main(BaseModule):
                 "admins": [],
                 "health_check_interval": 1440,
                 "health_check_fail_threshold": 3,
+                "health_check_probe_timeout": 10,
             }
             sdk.config.setConfig("RssReader", default, immediate=True)
             self.logger.info("已创建默认配置")
@@ -73,6 +74,8 @@ class Main(BaseModule):
             config["health_check_interval"] = 1440
         if "health_check_fail_threshold" not in config:
             config["health_check_fail_threshold"] = 3
+        if "health_check_probe_timeout" not in config:
+            config["health_check_probe_timeout"] = 10
         return config
 
     def _is_admin(self, event) -> bool:
@@ -298,25 +301,26 @@ class Main(BaseModule):
         await event.reply(f"已将「{name}」的推送间隔修改为 {new_label}")
 
     async def _menu_health(self, event):
-        if not self._is_admin(event):
-            await event.reply("仅管理员可使用健康检查功能")
-            return
-
         conv = event.conversation(timeout=180)
         threshold = self.config.get("health_check_fail_threshold", 3)
-        unhealthy = self.store.list_unhealthy(fail_threshold=threshold)
+        is_admin = self._is_admin(event)
+        user_id = str(event.get_user_id())
+        added_by = None if is_admin else user_id
+
+        unhealthy = self.store.list_unhealthy(fail_threshold=threshold, added_by=added_by)
 
         await self._send_templates_conv(conv, event, FeedTemplates.build_health_list(unhealthy, threshold))
 
         if not unhealthy:
-            await conv.say("输入“检查”可立即手动体检全部订阅，或回复“退出”结束")
+            scope_tip = "" if is_admin else "\n（非管理员仅显示你添加的订阅）"
+            await conv.say(f"当前没有可管理的失效订阅{scope_tip}\n输入“检查”可立即手动体检全部订阅，或回复“退出”结束")
             resp = await conv.wait()
             if not resp:
                 return
             if resp.get_text().strip() in ("检查", "体检", "scan", "check"):
-                await conv.say(f"正在体检 {len(self.store.get_all_enabled())} 个订阅...")
+                await conv.say(f"正在体检 {len(self.store.get_all_enabled())} 个订阅（每个最长 {self.config.get('health_check_probe_timeout', 10)}s）...")
                 await self.scheduler._run_health_check()
-                unhealthy = self.store.list_unhealthy(fail_threshold=threshold)
+                unhealthy = self.store.list_unhealthy(fail_threshold=threshold, added_by=added_by)
                 await self._send_templates_conv(conv, event, FeedTemplates.build_health_list(unhealthy, threshold))
                 if not unhealthy:
                     return
@@ -337,9 +341,9 @@ class Main(BaseModule):
             return
 
         if choice == "4":
-            await conv.say(f"正在体检 {len(self.store.get_all_enabled())} 个订阅...")
+            await conv.say(f"正在体检 {len(self.store.get_all_enabled())} 个订阅（每个最长 {self.config.get('health_check_probe_timeout', 10)}s）...")
             await self.scheduler._run_health_check()
-            unhealthy = self.store.list_unhealthy(fail_threshold=threshold)
+            unhealthy = self.store.list_unhealthy(fail_threshold=threshold, added_by=added_by)
             await self._send_templates_conv(conv, event, FeedTemplates.build_health_list(unhealthy, threshold))
             return
 
@@ -1216,7 +1220,7 @@ function rsRenderSubs(subs,isFiltered){
         }
         var act=s.enabled?'<button class="rs-btn-sm" style="background:var(--bg-s);color:var(--tx-p)" onclick="rsToggleSub('+s.id+')">暂停</button>'
             :'<button class="rs-btn-sm" style="background:var(--ok-c);color:#fff" onclick="rsToggleSub('+s.id+')">恢复</button>';
-        act+='<button class="rs-btn-sm" style="background:var(--accent);color:#fff" onclick="rsShowEditUrl('+s.id+',\''+esc(s.url||'').replace(/'/g,"\\'")+'\')">改URL</button>';
+        act+='<button class="rs-btn-sm" style="background:var(--accent);color:#fff" data-id="'+s.id+'" data-url="'+esc(s.url||'')+'" onclick="rsShowEditUrl(this)">改URL</button>';
         act+='<button class="rs-btn-sm" style="background:var(--er-c);color:#fff" onclick="rsDeleteSub('+s.id+')">删除</button>';
         var tgt=s.target_type==='global'?'全局':s.target_type+':'+s.target_id;
         html+='<tr><td>'+s.id+'</td><td>'+esc(s.name||s.url)+'</td><td class="rs-url" title="'+esc(s.url)+'">'+esc(s.url)+'</td><td>'+esc(s.platform||'')+'</td><td>'+esc(tgt)+'</td><td>'+status+'</td><td>'+healthBadge+'</td><td>'+s.interval_minutes+'m</td><td>'+act+'</td></tr>';
@@ -1246,8 +1250,10 @@ function rsDeleteSub(id){
     if(!confirm('确定删除该订阅?'))return;
     rsApi('DELETE','/api/subscriptions/'+id).then(function(){loadRssReaderView();});
 }
-function rsShowEditUrl(id,curUrl){
-    document.getElementById('rs-editurl-old').value=curUrl||'';
+function rsShowEditUrl(btn){
+    var id=btn.getAttribute('data-id');
+    var curUrl=btn.getAttribute('data-url')||'';
+    document.getElementById('rs-editurl-old').value=curUrl;
     document.getElementById('rs-editurl-new').value='';
     document.getElementById('rs-editurl-modal-bg').style.display='block';
     document.getElementById('rs-editurl-modal').style.display='block';

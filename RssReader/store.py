@@ -285,7 +285,7 @@ class FeedStore:
         }).Where("id = ?", sub_id).Execute()
         return True
 
-    def list_unhealthy(self, fail_threshold: int = 3, target_type: str = None, target_id: str = None) -> List[dict]:
+    def list_unhealthy(self, fail_threshold: int = 3, target_type: str = None, target_id: str = None, added_by: str = None) -> List[dict]:
         query = sdk.storage.Table(_SUBS).Select(*_SUB_COLS)
         conds = [f"fail_count >= ?", "enabled = 1"]
         params: list = [fail_threshold]
@@ -293,6 +293,8 @@ class FeedStore:
             conds.append("target_type = ?"); params.append(target_type)
         if target_id:
             conds.append("target_id = ?"); params.append(target_id)
+        if added_by:
+            conds.append("added_by = ?"); params.append(added_by)
         query = query.Where(" AND ".join(conds), *params)
         return [_to_dict(r) for r in query.OrderBy("id").Execute()]
 

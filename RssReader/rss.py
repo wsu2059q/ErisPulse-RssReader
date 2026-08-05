@@ -144,10 +144,10 @@ async def fetch_rss(url: str, count: int = 10) -> List[FeedItem]:
     return items
 
 
-async def probe_rss(url: str) -> Optional[dict]:
+async def probe_rss(url: str, timeout: int = 30) -> Optional[dict]:
     try:
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
+            timeout=aiohttp.ClientTimeout(total=timeout),
             headers={"User-Agent": "ErisPulse-RssReader/1.0"},
         ) as session:
             async with session.get(url) as resp:

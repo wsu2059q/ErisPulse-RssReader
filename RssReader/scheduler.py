@@ -184,28 +184,38 @@ class FeedScheduler:
             except Exception as e:
                 self.logger.error(f"Health check loop error: {e}")
 
+    def get_probe_timeout(self) -> int:
+        try:
+            return max(3, int(self.config.get("health_check_probe_timeout", 10)))
+        except Exception:
+            return 10
+
     async def _run_health_check(self):
         subs = self.store.get_all_enabled()
         if not subs:
             return
         self.logger.info(f"Health check start, {len(subs)} subscriptions")
         threshold = self.get_fail_threshold()
+        probe_timeout = self.get_probe_timeout()
 
-        probe_tasks = [probe_rss(s.get("url", "")) for s in subs]
+        probe_tasks = [probe_rss(s.get("url", ""), timeout=probe_timeout) for s in subs]
         results = await asyncio.gather(*probe_tasks, return_exceptions=True)
 
+        ok_count = 0
         for sub, res in zip(subs, results):
             sub_id = sub["id"]
             if isinstance(res, Exception):
                 new_fail = self.store.update_health(sub_id, ok=False, error=f"{type(res).__name__}: {res}")
             elif res:
                 new_fail = self.store.update_health(sub_id, ok=True)
+                ok_count += 1
             else:
                 new_fail = self.store.update_health(sub_id, ok=False, error="无法解析或HTTP错误")
             if new_fail == threshold:
                 fresh = self.store.get_subscription(sub_id) or sub
                 await self._notify_unhealthy(fresh, new_fail)
-        self.logger.info("Health check done")
+        self.logger.info(f"Health check done, {ok_count}/{len(subs)} ok")
+        return {"total": len(subs), "ok": ok_count, "fail": len(subs) - ok_count}
 
     async def _notify_unhealthy(self, sub: dict, fail_count: int):
         if not self._send_fn:
